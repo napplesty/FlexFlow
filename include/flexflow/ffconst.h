@@ -49,6 +49,13 @@ enum ParameterSyncType {
   NCCL = 82,
 };
 
+enum ParameterSyncOption {
+  DEFAULT = 90,
+  RING = 91,
+  BUTTERFLY = 92,
+  DOUBLE_BINARY_TREE = 93,
+};
+
 enum MetricsType {
   METRICS_ACCURACY = 1001,
   METRICS_CATEGORICAL_CROSSENTROPY = 1002,

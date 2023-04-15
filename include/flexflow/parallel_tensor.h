@@ -181,6 +181,8 @@ public:
   ParallelDim dims[MAX_TENSOR_DIM];
   DataType data_type = DT_NONE;
   ParameterSyncType sync_type = ParameterSyncType::NONE;
+  ParameterSyncOption sync_option = ParameterSyncOption::DEFAULT;
+  bool should_add_barrier = true;
   Initializer *initializer = nullptr;
   // Describes the ownership of this tensor
   Op const *owner_op = nullptr;

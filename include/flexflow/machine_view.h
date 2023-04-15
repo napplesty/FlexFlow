@@ -4,7 +4,7 @@
 #include "legion.h"
 #include <vector>
 #ifdef FF_USE_NCCL
-#include <nccl.h>
+#include "nccl.h"
 #endif
 #include "flexflow/config.h"
 

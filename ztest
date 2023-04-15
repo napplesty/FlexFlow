@@ -1,0 +1,8 @@
+./mlp_unify -ll:gpu 1 -ll:cpu 4 -ll:fsize 5000 -ll:zsize 1000 -ll:util 2 -ll:bgwork 2 --export-strategy ./strategy.ckpt --search-num-nodes 8 --search-num-workers 8 --substitution-json /mnt/d/ff2/FlexFlow/substitutions/test_subst.json --only-data-parallel --topo-file /mnt/d/ff2/FlexFlow/network_tools/fattree.topo
+
+
+
+
+./mlp_unify -ll:gpu 1 -ll:cpu 4 -ll:fsize 5000 -ll:zsize 1000 -ll:util 2 -ll:bgwork 2 --export-strategy ./strategy.ckpt --search-num-nodes 1 --search-num-workers 1 --substitution-json /mnt/d/ff2/FlexFlow/substitutions/test_subst.json --only-data-parallel --topo-file /mnt/d/ff2/FlexFlow/network_tools/debug.topo
+
+

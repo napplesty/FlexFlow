@@ -14,7 +14,7 @@
 #INSTALL_DIR=
 
 # set build type
-BUILD_TYPE=${BUILD_TYPE:-Release}
+BUILD_TYPE=${BUILD_TYPE:-Debug}
 
 # set CUDA Arch to the desired GPU architecture(s) to target (e.g. pass "FF_CUDA_ARCH=60" for Pascal). 
 # To pass more than one value, separate architecture numbers with a comma (e.g. FF_CUDA_ARCH=70,75).
@@ -29,7 +29,7 @@ CUDNN_DIR=${CUDNN_DIR:-"/usr/local/cuda"}
 CUDA_DIR=${CUDA_DIR:-"/usr/local/cuda"}
 
 # enable Python
-FF_USE_PYTHON=${FF_USE_PYTHON:-ON}
+FF_USE_PYTHON=${FF_USE_PYTHON:-OFF}
 
 # enable GASNet
 FF_USE_GASNET=${FF_USE_GASNET:-OFF}
@@ -38,17 +38,17 @@ FF_USE_GASNET=${FF_USE_GASNET:-OFF}
 FF_GASNET_CONDUIT=${FF_GASNET_CONDUIT:-ibv}
 
 # build C++ examples
-FF_BUILD_ALL_EXAMPLES=${FF_BUILD_ALL_EXAMPLES:-OFF}
+FF_BUILD_ALL_EXAMPLES=${FF_BUILD_ALL_EXAMPLES:-ON}
 
 # build C++ unit tests
 FF_BUILD_UNIT_TESTS=${FF_BUILD_UNIT_TESTS:-OFF}
 
 # use precompiled NCCL and Legion libraries, where available
 FF_USE_PREBUILT_NCCL=${FF_USE_PREBUILT_NCCL:-ON}
-FF_USE_PREBUILT_LEGION=${FF_USE_PREBUILT_LEGION:-OFF}
+FF_USE_PREBUILT_LEGION=${FF_USE_PREBUILT_LEGION:-ON}
 # use the flag below to use both the NCCL and Legion pre-built libraries.
 # when the flag below is set to ON, the two flags above are ignored.
-FF_USE_ALL_PREBUILT_LIBRARIES=${FF_USE_ALL_PREBUILT_LIBRARIES:-OFF}
+FF_USE_ALL_PREBUILT_LIBRARIES=${FF_USE_ALL_PREBUILT_LIBRARIES:-ON}
 
 # enable avx2
 FF_USE_AVX2=${FF_USE_AVX2:-OFF}

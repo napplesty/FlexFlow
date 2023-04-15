@@ -163,6 +163,16 @@ public:
              int device_id,
              float latency,
              float bandwidth);
+// 模拟真实线路和端口用的
+public:
+// helper functions
+  std::vector<float> ready_times;
+  int earliest_ready_time_port_index;
+  void set_port(int n);
+  float get_ready_time();
+  void put_finish_time(float ready_time);
+// 区分是否是nominal device
+  bool is_nominal = false;
 };
 
 typedef std::vector<CommDevice *> Route;
@@ -184,6 +194,8 @@ public:
                     NetworkRoutingStrategy *routing);
   /* pick one of the weighted ECMP path */
   Route expand_to_physical() const;
+  /* 运行模拟时候搞定 */
+  Route expand_to_best_physical(std::map<Device *, float> &dev_times);
   EcmpRoutes const &get_all_routes();
   void set_physical_paths(EcmpRoutes const &rs);
   void reset();
@@ -414,6 +426,31 @@ public:
   int total_devs;
 };
 
+class WeightedMultiplePathRoutingStrategy : public NetworkRoutingStrategy {
+public:
+  WeightedMultiplePathRoutingStrategy(
+      ConnectionMatrix const &c,
+      std::map<size_t, CommDevice *> const &devmap,
+      int total_devs,
+      int total_nodes);
+  virtual EcmpRoutes get_routes(int src_node, int dst_node);
+  virtual std::vector<EcmpRoutes> get_routes_from_src(int src_node);
+  void hop_count(int src_node, int dst_node, int &hop, int &narrowest);
+  std::vector<std::pair<int, int>> hop_count(int src_node);
+  void clear();
+public:
+  void get_routes_all();
+
+public:
+  ConnectionMatrix const &conn;
+  ConnectionMatrix state;
+  std::map<size_t, CommDevice *> devmap;
+  std::map<CommDevice *, size_t> devmap_id;
+  std::map<std::pair<int,int>, EcmpRoutes> routes_memory;
+  int total_devs;
+  int total_nodes;
+};
+
 /**
  * A (virtual base) class that generates network topology
  * Maybe this should be moved out of simulator
@@ -424,15 +461,21 @@ public:
   static void
       print_conn_matrix(ConnectionMatrix const &conn, int nnode, int nswitch) {
     int nnwdevs = nnode + nswitch;
-    for (int i = 0; i < nnwdevs; i++) {
-      if (i == nnode) {
-        std::cout << std::endl;
-      }
-      for (int j = 0; j < nnwdevs; j++) {
-        if (j == nnode) {
-          std::cout << "\t";
-        }
-        std::cout << conn[i * nnwdevs + j] << "\t";
+    //for (int i = 0; i < nnwdevs; i++) {
+    //  if (i == nnode) {
+    //    std::cout << std::endl;
+    //  }
+    //  for (int j = 0; j < nnwdevs; j++) {
+    //    if (j == nnode) {
+    //      std::cout << "\t";
+    //    }
+    //    std::cout << conn[i * nnwdevs + j] << "\t";
+    //  }
+    //  std::cout << std::endl;
+    //}
+    for(int i = 0; i<nnwdevs; i++) {
+      for(int j = 0;j<nnwdevs;j++) {
+        std::cout << conn[i*nnwdevs + j] << ' ';
       }
       std::cout << std::endl;
     }
@@ -497,6 +540,116 @@ public:
 public:
   int num_nodes;
 };
+
+class FatTreeTopologyGenerator : public NetworkTopologyGenerator {
+public:
+  FatTreeTopologyGenerator(int num_nodes_per_pod,
+                           int degree_node_to_sw, 
+                           int num_pods, 
+                           int num_sw_per_pod,
+                           int degree_sw_intra_pod,
+                           int degree_sw_inter_pod,
+                           std::vector<int> actual_server_ids) : 
+                           num_nodes_per_pod(num_nodes_per_pod),
+                           degree_node_to_sw(degree_node_to_sw),
+                           num_pods(num_pods),
+                           num_sw_per_pod(num_sw_per_pod),
+                           degree_sw_intra_pod(degree_sw_intra_pod),
+                           degree_sw_inter_pod(degree_sw_inter_pod),
+                           actual_server_ids(actual_server_ids) {}
+  virtual ConnectionMatrix generate_topology() const;
+
+public:
+  int num_nodes_per_pod;
+  int degree_node_to_sw; 
+  int num_pods;
+  int num_sw_per_pod;
+  int degree_sw_intra_pod;
+  int degree_sw_inter_pod;
+  std::vector<int> actual_server_ids;
+};
+
+class CustomTopologyGenerator : public NetworkTopologyGenerator {
+public:
+  CustomTopologyGenerator(std::string file);
+
+  virtual ConnectionMatrix generate_topology() const;
+public:
+  std::string filename;
+  ConnectionMatrix conn;
+  int num_nodes,num_switches,gpu_per_node;
+};
+
+class SimTask {
+public:
+  enum SimTaskType {
+    TASK_FORWARD,
+    TASK_BACKWARD,
+    TASK_COMM,
+    TASK_UPDATE,
+    TASK_BARRIER,
+    TASK_NOMINAL_COMM,
+    TASK_ALLREDUCE
+  };
+  SimTask();
+  void add_next_task(SimTask *task);
+
+public:
+  float ready_time, run_time;
+  SimTaskType type;
+  Device *device;
+  MemDevice *mem;
+  int counter;
+  size_t xfer_size;
+  size_t xfer_left;
+  std::vector<SimTask *> next_tasks;
+  // const char *op_name;
+  bool store;
+  std::string name;
+  std::string get_type_str() const;
+  Op *op = nullptr;
+  ParallelParameter weight = nullptr;
+};
+
+typedef std::vector<std::vector<std::pair<int, int>>> AllreducePattern;
+class AllreduceHelper {
+public:
+  AllreduceHelper(int num_nodes, int gpu_per_node);
+  // 检查是否冲突，
+  std::pair<float,float> allreduce_generator(std::vector<int> &device_ids,
+                                             std::vector<Device *> &devs,
+                                             std::map<Device *, float> &dev_times, 
+                                             ParameterSyncOption &sync_option,
+                                             size_t transfer_size,
+                                             float bandwidth,
+                                             float last_collective_comm_start_time,
+                                             AllreducePattern &ar_pattern);
+  // 开始时间和结束时间
+  std::pair<float, float> allreduce_try(std::map<Device *, float> &dev_times,
+                                        std::vector<Device *> &devs,
+                                        AllreducePattern &allreduce_pattern,
+                                        size_t transfer_size,
+                                        float bandwidth);
+
+public:
+  std::vector<AllreducePattern> ring_pattern_generator(std::vector<int> &device_ids);
+  std::vector<AllreducePattern> butterfly_pattern_generator(std::vector<int> &device_ids);
+  std::vector<AllreducePattern> dbt_pattern_generator(std::vector<int> &device_ids);
+
+public:
+  void print_allreduce_pattern(AllreducePattern &ar_pat);
+
+public:
+  unsigned long hash(std::vector<int> device_ids);
+  std::map<Device *, float> estimated_dev_times;
+  float estimated_barrier_time;
+
+public:
+  std::map<unsigned long, AllreducePattern> memory;
+  int num_nodes;
+  int gpu_per_node;
+};
+
 /**
  * A model that is network topology-aware.
  * The network topology is represented as follows:
@@ -617,35 +770,6 @@ struct OpSyncTaskEarliestFirst {
   }
 };
 
-class SimTask {
-public:
-  enum SimTaskType {
-    TASK_FORWARD,
-    TASK_BACKWARD,
-    TASK_COMM,
-    TASK_UPDATE,
-    TASK_BARRIER,
-    TASK_NOMINAL_COMM,
-    TASK_ALLREDUCE
-  };
-  SimTask();
-  void add_next_task(SimTask *task);
-
-public:
-  float ready_time, run_time;
-  SimTaskType type;
-  Device *device;
-  MemDevice *mem;
-  int counter;
-  size_t xfer_size;
-  size_t xfer_left;
-  std::vector<SimTask *> next_tasks;
-  // const char *op_name;
-  bool store;
-  std::string name;
-  std::string get_type_str() const;
-};
-
 class SimTaskCompare {
 public:
   bool operator()(SimTask *lhs, SimTask *rhs) {
@@ -669,6 +793,14 @@ public:
                                  size_t message_size);
   SimTask *new_forward_task(Op const *op, int idx);
   SimTask *new_allreduce_task(Op const *op,
+                              std::vector<int> const &node_ids,
+                              size_t message_size);
+  SimTask *new_allreduce_task_with_option(Op *op,
+                              ParallelParameter weight,
+                              std::vector<int> const &node_ids,
+                              size_t message_size);
+  SimTask *new_allreduce_optimize_task(Op *op,
+                              ParallelParameter weight,
                               std::vector<int> const &node_ids,
                               size_t message_size);
   SimTask *new_backward_task(Op const *op, int idx);
@@ -791,6 +923,8 @@ public:
 
   SimTask *new_comm_task_unrecorded();
   SimTask *new_update_task_unrecorded();
+  SimTask *new_barrier_task_unrecorded();
+  
   virtual float
       simulate_runtime(FFModel const *model,
                        std::map<Op const *, ParallelConfig> const &global,
@@ -800,6 +934,24 @@ public:
                        std::map<Op const *, ParallelConfig> const &global,
                        CompMode comp_mode,
                        std::string const &export_file_name);
+// 正常的simulation
+  virtual float
+      simulation_with_network(FFModel const *model,
+                              std::map<Op const*, ParallelConfig> const &global,
+                              CompMode comp_mode,
+                              std::string const &export_file_name);
+// 贪心优化allreduce 后的simulation
+  virtual float
+      simulation_with_allreduce_optimize(FFModel const *model,
+                                         std::map<Op const*, ParallelConfig> const &global,
+                                         CompMode comp_mode,
+                                         std::vector<ParallelParameter> &parameter_seq,
+                                         std::string const &export_file_name);
+// 考虑交换机port的route_transfer
+// 检查是不是nominal device
+  virtual float networked_route_transfer(SimTask *transfer_task,
+                                    float start_time,
+                                    std::map<Device *, float> &device_times);
   virtual float route_transfer(SimTask *transfer_task,
                                float start_time,
                                std::map<Device *, float> &device_times);
@@ -810,11 +962,52 @@ public:
   virtual void expand_allreduce(
       SimTask *allreduce_task,
       float start_time,
-      std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare>
-          &ready_queue);
+      std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue);
+
+// 在任务结束增加barrier任务, 根据add_barrier
+  virtual SimTask *expand_allreduce_simple(
+      AllreduceHelper &ar_helper,
+      SimTask *allreduce_task,
+      float start_time,
+      std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue,
+      std::queue<SimTask *> &barrier_queue
+  );
+
+// 自定义expand allreduce 任务
+// 返回最后的update 任务
+  virtual SimTask *expand_allreduce_customize(
+    AllreducePattern &ar_pattern,
+    std::vector<Device *> &devs,
+    SimTask *allreduce_task,
+    SimTask *last_update_task,
+    float start_time,
+    float estimated_run_time, //for update task
+    std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue,
+    // barrier queue的后一个barrier task必然在前一个的next task里
+    std::queue<SimTask *> &barrier_queue,
+    bool add_barrier
+  );
+
+  virtual SimTask *expand_allreduce_with_optimization(
+      AllreduceHelper &ar_helper,
+      SimTask *allreduce_task,
+      SimTask *last_update_task,
+      float start_time,
+      float &last_collective_comm_task_start_time,
+      std::vector<Device *> &devs,
+      std::map<Device *, float> &dev_times,
+      std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue,
+      std::queue<SimTask *> &barrier_queue
+  );
+
   void add_task_dependencies_with_xfer(SimTask *src_task,
                                        SimTask *dst_task,
                                        size_t message_size);
+
+// 选择最好的
+void add_task_dependencies_with_optimal_xfer(SimTask *src_task,
+                                             SimTask *dst_task,
+                                             size_t message_size);
   static void
       simulation_task(Legion::Task const *task,
                       std::vector<Legion::PhysicalRegion> const &regions,

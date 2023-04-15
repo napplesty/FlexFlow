@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(FlexFlow)
 
 include(ExternalProject)
-
+# set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Set policy CMP0074 to eliminate cmake warnings
 cmake_policy(SET CMP0074 NEW)
 cmake_policy(SET CMP0077 NEW)

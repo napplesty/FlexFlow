@@ -15,6 +15,7 @@
 
 #include "flexflow/model.h"
 #include <fstream>
+#include <ios>
 #include <sstream>
 #include <string>
 using namespace Legion;
@@ -33,7 +34,7 @@ void FlexFlow::top_level_task(Task const *task,
   FFModel ff(ffConfig);
 
   std::vector<int> hidden_dims = {
-      8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192};
+      2024, 2024, 2024, 2024, 2024, 2024, 2024, 1024};
   Tensor input1, input2;
   {
     int const dims[] = {ffConfig.batchSize, 1024};
@@ -55,6 +56,9 @@ void FlexFlow::top_level_task(Task const *task,
   metrics.push_back(METRICS_ACCURACY);
   metrics.push_back(METRICS_SPARSE_CATEGORICAL_CROSSENTROPY);
   ff.compile(optimizer, LOSS_SPARSE_CATEGORICAL_CROSSENTROPY, metrics);
+  for(auto *p: ff.parameters) {
+    std::cout << "parameter should be overlap " << p->owner_op->name << ' ' << std::boolalpha << p->should_add_barrier << std::endl;
+  }
   ff.init_operators();
   // Start timer
   {
@@ -71,8 +75,8 @@ void FlexFlow::top_level_task(Task const *task,
       runtime->begin_trace(ctx, 111 /*trace_id*/);
       ff.forward();
       ff.zero_gradients();
-      // ff.backward();
-      // ff.update();
+      ff.backward();
+      ff.update();
       runtime->end_trace(ctx, 111 /*trace_id*/);
     }
   }
@@ -88,6 +92,7 @@ void FlexFlow::top_level_task(Task const *task,
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
          ffConfig.batchSize * 128 * ffConfig.epochs / run_time);
+  printf("Epoch time %.4fs\n", run_time/ffConfig.epochs);
 }
 
 void FlexFlow::register_custom_tasks() {}

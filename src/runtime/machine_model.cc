@@ -1051,7 +1051,8 @@ NetworkedMachineModel::NetworkedMachineModel(int num_nodes,
                          -1,
                          device_id,
                          0,
-                         conn_matrix[i * total_devs + j] * link_bandwidth);
+                         link_bandwidth);
+      ids_to_nw_comm_device[device_id]->set_port(conn_matrix[i * total_devs + j]);
     }
     // }
   }
@@ -1083,6 +1084,7 @@ void NetworkedMachineModel::update_route() {
             link_name, device_id, total_devs, routing_strategy);
       }
       ids_to_nw_nominal_device[device_id]->reset();
+      ids_to_nw_nominal_device[device_id]->is_nominal = true;
       // ids_to_nw_nominal_device[device_id]->set_physical_paths(routing_strategy->get_routes(i,
       // j));
     }
@@ -1145,6 +1147,7 @@ std::vector<CommDevice *>
   /* This implementation very much is an extension of the simple_machine
    * model's version. no details about socket and memories
    */
+  pipelined = true;
   std::vector<CommDevice *> ret;
   // on the same memory
   if (src_mem->mem_type == tar_mem->mem_type and

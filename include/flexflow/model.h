@@ -164,6 +164,8 @@ enum TaskIDs {
   STRATEGY_SEARCH_TASK_ID,
   // Graph
   GRAPH_OPTIMIZE_TASK_ID,
+  // Allreduce
+  ALLREDUCE_OPTIMIZE_TASK_ID,
   // Python data loader
   PY_DL_FLOAT_LOAD_ENTIRE_CPU_TASK_ID,
   PY_DL_INT32_LOAD_ENTIRE_CPU_TASK_ID,
@@ -781,6 +783,11 @@ public:
                LossType loss_type,
                std::vector<MetricsType> const &metrics,
                CompMode comp_mode = COMP_MODE_TRAINING);
+  void virtual_compile_with_optimizaiton(
+    LossType loss_type,
+    std::vector<MetricsType> const &metrics,
+    CompMode comp_mode = COMP_MODE_TRAINING
+  );
   void graph_optimize(size_t budget,
                       bool only_data_parallel,
                       std::unique_ptr<PCG::Graph> &best_graph,
@@ -848,6 +855,7 @@ public:
   int metrics_input;
   ParallelTensor parallel_label_tensor;
   Tensor label_tensor;
+  std::string topo_file;
 
   std::vector<Layer *> layers;
   std::vector<Op *> operators;
@@ -1001,6 +1009,11 @@ void data_load_task(Legion::Task const *task,
 void register_flexflow_internal_tasks();
 
 void register_custom_tasks();
+
+float allreduce_optimize(Legion::Task const *task,
+                        std::vector<Legion::PhysicalRegion> const &regions,
+                        Legion::Context ctx,
+                        Legion::Runtime *runtime);
 
 }; // namespace FlexFlow
 

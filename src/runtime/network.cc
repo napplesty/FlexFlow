@@ -3,6 +3,7 @@
 #include <limits>
 #include <queue>
 #include <random>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -473,6 +474,165 @@ std::vector<std::pair<int, int>>
   return result;
 }
 
+WeightedMultiplePathRoutingStrategy::WeightedMultiplePathRoutingStrategy(ConnectionMatrix const &c,
+    std::map<size_t, CommDevice *> const &devmap,
+    int total_devs,
+    int total_nodes) : conn(c),
+                       state(c),                       // shape 是 1, total_devs * total_devs的
+                       devmap(devmap),                 // shape 是 1, total_devs * total_devs的
+                       total_devs(total_devs),
+                       total_nodes(total_nodes) {
+  routes_memory.clear();
+  devmap_id.clear();
+  for(auto k : devmap) {
+    devmap_id.insert(std::pair<CommDevice *, size_t>(k.second, k.first));
+  }
+  get_routes_all();
+}
+
+EcmpRoutes WeightedMultiplePathRoutingStrategy::get_routes(int src_node,
+                                                           int dst_node) {
+  assert(routes_memory.count(std::pair<int,int>(src_node, dst_node)) > 0);
+  //EcmpRoutes ret = routes_memory.at(std::make_pair<int,int>(src_node, dst_node));
+  //for(int i = 0; i < ret.first.size(); i++) {
+  //  if(!check_routes_capacity(ret.second[i])) {
+  //    ret.first[i] = -1;
+  //  }
+  //}
+  //return ret;
+  return routes_memory.at(std::pair<int,int>(src_node, dst_node));
+}
+
+void WeightedMultiplePathRoutingStrategy::hop_count(int src_node,
+                                                    int dst_node,
+                                                    int &hop,
+                                                    int &narrowest) {
+  EcmpRoutes candidate_path = get_routes(src_node, dst_node);
+  int num_candidates = candidate_path.first.size();
+  for(int i = 0; i < num_candidates; i++) {
+    bool available_path = true;
+    for(int j = 0; j < candidate_path.second[i].size(); j++) {
+      if(state[devmap_id[candidate_path.second[i][j]]] == 0) {
+        available_path = false;
+        break;
+      }
+    }
+    if(available_path) {
+      hop = hop > candidate_path.second[i].size() ? candidate_path.second[i].size() : hop;
+      narrowest = 1;
+    }
+  }
+  return;
+}
+
+std::vector<EcmpRoutes> WeightedMultiplePathRoutingStrategy::get_routes_from_src(int src_node) {
+  std::vector<EcmpRoutes> final_result;
+  for(int i = 0; i < total_devs; i++) {
+    if(i == src_node) {
+      final_result.emplace_back(std::make_pair(std::vector<float>{}, std::vector<Route>{}));
+    } else {
+      final_result.emplace_back(get_routes(src_node, i));
+    }
+  }
+  return final_result;
+}
+
+void WeightedMultiplePathRoutingStrategy::clear() {
+  state.clear();
+  state.assign(conn.begin(), conn.end());
+}
+
+
+//bool WeightedMultiplePathRoutingStrategy::check_routes_capacity(Route &route) {
+//  bool result = true;
+//  for(auto dev: route) {
+//    if(state[devmap_id[dev]] == 0) {
+//      result = false;
+//      break;
+//    }
+//  }
+//  return result;
+//}
+
+void WeightedMultiplePathRoutingStrategy::get_routes_all() {
+  int tolerance = 2; // 最短路和最长路的跳数差
+  for(int src_node = 0; src_node < total_devs; src_node ++) {
+    for(int dst_node = 0; dst_node < total_devs; dst_node ++) {
+      if(src_node == dst_node) {
+        routes_memory.insert(std::make_pair<std::pair<int,int>, EcmpRoutes>(
+          std::pair<int,int>(src_node, dst_node),
+          std::make_pair(std::vector<float>{}, std::vector<Route>{})));
+        continue;
+      }
+      // 开始搜索BFS
+      // 找多路的算法这里可能还需要想一想, 复杂度太高了
+      EcmpRoutes src_dst_emcp;
+      std::deque<std::pair<int, Route>> dq;
+      bool has_found = false;
+      int min_length = std::numeric_limits<int>::max();
+
+
+      dq.emplace_back(std::pair<int, Route>(src_node, std::vector<CommDevice *>() ));
+
+      while (!dq.empty()) {
+        std::pair<int, Route> curr_node = dq.front();
+        dq.pop_front();
+        int curr_node_idx = curr_node.first;
+
+        // check in the tolerated degree
+        if (curr_node.second.size()-tolerance >= min_length-1) {
+          continue;
+        }
+        // check is dst_node
+        if(conn[total_devs * curr_node_idx + dst_node] > 0) {
+          std::pair<int, Route> explo = std::pair<int, Route>(dst_node, curr_node.second);
+          explo.second.emplace_back(devmap[total_devs * curr_node_idx + dst_node]);
+
+          src_dst_emcp.first.emplace_back(1.0f);
+          src_dst_emcp.second.emplace_back(explo.second);
+
+          has_found = true;
+          min_length = min_length < explo.second.size() ? min_length : explo.second.size();
+
+          continue;
+        }
+        // find neighbors
+        for(int neighbor_idx = total_nodes; neighbor_idx < total_devs; neighbor_idx ++) {
+          if(conn[total_devs * curr_node_idx + neighbor_idx] > 0) {
+            std::pair<int, Route> explo = std::pair<int, Route>(neighbor_idx, curr_node.second);
+            bool no_repeated = true;
+
+            // 去除重复经过的节点
+            for(auto prev_dev: explo.second) {
+              int prev_src = devmap_id[prev_dev] / total_devs;
+              int prev_dst = devmap_id[prev_dev] % total_devs;
+              if(prev_src == curr_node_idx && prev_dst == neighbor_idx) {
+                no_repeated = false;
+                break;
+              }
+              if(prev_src == neighbor_idx && prev_dst == curr_node_idx) {
+                no_repeated = false;
+                break;
+              }
+            }
+            if(no_repeated) {
+              explo.second.emplace_back(devmap[total_devs * curr_node_idx + neighbor_idx]);
+              dq.emplace_back(explo);
+            }
+          }
+        }
+      }
+      // standarize
+      for(int i = 0; i < src_dst_emcp.first.size(); i++) {
+        src_dst_emcp.first[i] = 1.0/src_dst_emcp.first.size();
+      }
+      routes_memory.insert(std::pair<std::pair<int,int>, EcmpRoutes>(
+          std::pair<int,int>(src_node, dst_node),
+          src_dst_emcp));
+    }
+  }
+}
+
 FlatDegConstraintNetworkTopologyGenerator::
     FlatDegConstraintNetworkTopologyGenerator(int num_nodes, int degree)
     : num_nodes(num_nodes), degree(degree) {}
@@ -581,6 +741,88 @@ ConnectionMatrix BigSwitchNetworkTopologyGenerator::generate_topology() const {
     conn[i * (num_nodes + 1) + num_nodes] = 1;
     conn[num_nodes * (num_nodes + 1) + i] = 1;
   }
+  return conn;
+}
+
+ConnectionMatrix FatTreeTopologyGenerator::generate_topology() const {
+  // something needs to be rethought is whether the connections in the core layer is necessary
+
+  int num_nodes = actual_server_ids.size();
+  int num_nodes_in_network = num_nodes_per_pod * num_pods;
+  int num_lower_sw = num_pods * num_sw_per_pod / 2;
+  int num_upper_sw = num_lower_sw;
+  int num_lower_sw_per_pod = num_sw_per_pod / 2;
+  int num_upper_sw_per_pod = num_sw_per_pod / 2;
+  int num_nodes_per_sw = num_nodes_in_network/num_lower_sw;
+  int num_devices = num_nodes + num_pods * num_sw_per_pod + num_pods;
+  int num_core = num_lower_sw * num_upper_sw;
+
+  ConnectionMatrix conn = 
+      std::vector<int>(num_devices * num_devices, 0);
+  
+  // connect server to lower switches
+  for(int i = 0; i < actual_server_ids.size(); i++) {
+    int neighbor_sw_id = num_nodes + actual_server_ids[i] / num_nodes_per_sw;
+    conn[num_devices * i+ neighbor_sw_id] = degree_node_to_sw;
+    conn[num_devices * neighbor_sw_id + i] = degree_node_to_sw;
+  }
+
+  // connect lower switches to higher switches
+  for(int lower_sw_id = num_nodes;
+      lower_sw_id < num_nodes + num_lower_sw;
+      lower_sw_id ++) {
+    for(int j = 0; j < num_upper_sw_per_pod; j++) {
+      int upper_neighbor_sw_id = num_nodes + num_lower_sw + (lower_sw_id-num_nodes) / num_lower_sw_per_pod * num_lower_sw_per_pod + j;
+      conn[num_devices * upper_neighbor_sw_id + lower_sw_id] = degree_sw_intra_pod;
+      conn[num_devices * lower_sw_id + upper_neighbor_sw_id] = degree_sw_intra_pod;
+    }
+  }
+
+  // connect upper switches to core switches
+  for(int upper_sw_id = num_nodes + num_lower_sw;
+      upper_sw_id < num_nodes + num_lower_sw + num_upper_sw;
+      upper_sw_id ++) {
+    for(int j = 0; j < num_upper_sw_per_pod; j++) {
+      int core_neighbor_sw_id = num_nodes+num_lower_sw+num_upper_sw + (upper_sw_id - num_nodes - num_lower_sw) % num_upper_sw_per_pod * num_upper_sw_per_pod + j;
+      conn[num_devices * upper_sw_id + core_neighbor_sw_id] = degree_sw_inter_pod;
+      conn[num_devices * core_neighbor_sw_id + upper_sw_id] = degree_sw_inter_pod;
+    }
+  }
+
+  return conn;
+}
+
+CustomTopologyGenerator::CustomTopologyGenerator(std::string file) {
+  // file 的格式
+  // 开头三行是num_node 和 num switches 和 gpu_per_node
+
+  // 接下来是邻接矩阵开头用 > 表示开始
+  printf("filename %s\n", file.c_str());
+  std::ifstream machine_config(file);
+  std::string line;
+  while (std::getline(machine_config, line)) {
+    if (line[0] != '#') {
+      std::istringstream iss(line);
+      std::vector<std::string> words{std::istream_iterator<std::string>{iss},
+                                     std::istream_iterator<std::string>{}};
+      if(words[0] == "num_nodes") {
+        num_nodes = std::stoi(words[2]);
+      } else if(words[0] == "num_switches") {
+        num_switches = std::stoi(words[2]);
+      } else if(words[0] == "gpu_per_node") {
+        gpu_per_node = std::stoi(words[2]);
+      } else if(words[0] == ">") {
+        for(int i = 0; i < num_switches+num_nodes; i++) {
+          conn.emplace_back(std::stoi(words[i+1]));
+        }
+      } else {
+        assert(false);
+      }
+    }
+  }
+}
+
+ConnectionMatrix CustomTopologyGenerator::generate_topology() const {
   return conn;
 }
 

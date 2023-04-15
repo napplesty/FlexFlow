@@ -1,0 +1,4 @@
+num_nodes = 1
+num_switches = 0
+gpu_per_node = 1
+> 0

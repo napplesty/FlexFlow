@@ -29,7 +29,7 @@
 #endif
 #include "tl/optional.hpp"
 #ifdef FF_USE_NCCL
-#include <nccl.h>
+#include "nccl.h"
 #endif
 
 namespace FlexFlow {
@@ -157,6 +157,8 @@ public:
   bool enable_control_replication;
   int python_data_loader_type;
   bool perform_memory_search{false};
+
+  std::string topo_file;
 };
 
 class FFIterationConfig {

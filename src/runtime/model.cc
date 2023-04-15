@@ -14,11 +14,17 @@
  */
 
 #include "flexflow/model.h"
+#include "flexflow/parallel_tensor.h"
+#include "flexflow/simulator.h"
+#include <cstring>
 #if defined(FF_USE_CUDA) || defined(FF_USE_HIP_CUDA)
 #include "flexflow/utils/cuda_helper.h"
 #else
 #include "flexflow/utils/hip_helper.h"
 #endif
+#include "flexflow/ffconst.h"
+#include "flexflow/machine_view.h"
+#include "flexflow/operator.h"
 #include "flexflow/ffconst_utils.h"
 #include "flexflow/graph.h"
 #include "flexflow/mapper.h"
@@ -1163,7 +1169,8 @@ FFModel::FFModel(FFConfig &_config)
       tensor_global_guid(TENSOR_GUID_FIRST_VALID),
       parallel_tensor_global_guid(PARALLEL_TENSOR_GUID_FIRST_VALID),
       node_global_guid(NODE_GUID_FIRST_VALID), config(_config), optimizer(NULL),
-      loss_op(NULL), metrics_op(NULL), simulator(NULL) {
+      loss_op(NULL), metrics_op(NULL), simulator(NULL),
+      topo_file(_config.topo_file) {
   this->search = new PCG::SearchHelper(this);
   this->graph_search = new PCG::GraphSearchHelper(this);
 
@@ -2926,7 +2933,6 @@ void FFModel::compile(LossType loss_type,
     for (int i = 0; i < op->numWeights; i++) {
       assert(op->weights[i]->owner_op != NULL);
       assert(op->weights[i]->region != LogicalRegion::NO_REGION);
-      parameters.push_back(op->weights[i]);
     }
     op->map_output_tensors(*this);
     // for (int i = 0; i < op->numOutputs; i++) {
@@ -2948,6 +2954,395 @@ void FFModel::compile(LossType loss_type,
       assert(op->outputs[i]->parallel_tensor_guid != 0);
     }
   }
+
+  // If an operator's input is training data
+  // No need to compute its gradients
+  for (size_t l = 0; l < operators.size(); l++) {
+    Op *op = operators[l];
+    for (int i = 0; i < op->numInputs; i++) {
+      assert(op->inputs[i]->owner_op != nullptr);
+      if (op->inputs[i]->owner_op->op_type == OP_INPUT) {
+        op->trainableInputs[i] = false;
+      }
+    }
+  }
+
+  // Perform fusion optimizations
+  if (config.perform_fusion) {
+    fprintf(stderr, "Applying fusion optimizations during compilation...\n");
+    fprintf(stderr, "%zu operators before fusion...\n", operators.size());
+    std::vector<Op *> new_operators;
+    std::vector<Op *> old_operators = operators;
+    while (apply_fusion(operators, new_operators)) {
+      for (size_t i = 0; i < new_operators.size(); i++) {
+        for (int idx = 0; idx < new_operators[i]->numInputs; idx++) {
+          for (size_t j = i + 1; j < new_operators.size(); j++) {
+            if (new_operators[i]->inputs[idx]->owner_op == new_operators[j]) {
+              assert(false);
+            }
+          }
+        }
+      }
+      operators = new_operators;
+    }
+    // Check integrity
+    for (size_t l = 0; l < operators.size(); l++) {
+      if (operators[l]->op_type == OP_FUSED) {
+        FusedOp *fused = (FusedOp *)operators[l];
+        int ioff = 0, woff = 0, ooff = 0;
+        for (int op = 0; op < fused->numOperators; op++) {
+          Op *old_op = fused->operators[op];
+          for (int i = 0; i < fused->op_num_inputs[op]; i++) {
+            int my_off = fused->op_input_idx[i + ioff];
+            if (fused->op_input_source[i + ioff] == FusedOp::SOURCE_INPUT) {
+              assert(fused->inputs[my_off]->region ==
+                     old_op->inputs[i]->region);
+            } else if (fused->op_input_source[i + ioff] ==
+                       FusedOp::SOURCE_OUTPUT) {
+              assert(fused->outputs[my_off]->region ==
+                     old_op->inputs[i]->region);
+            } else {
+              assert(false);
+            }
+          }
+          for (int i = 0; i < fused->op_num_weights[op]; i++) {
+            int my_off = fused->op_weight_idx[i + woff];
+            assert(fused->op_weight_source[i + woff] == FusedOp::SOURCE_WEIGHT);
+            assert(fused->weights[my_off]->region ==
+                   old_op->weights[i]->region);
+          }
+          for (int i = 0; i < fused->op_num_outputs[op]; i++) {
+            int my_off = fused->op_output_idx[i + ooff];
+            assert(fused->op_output_source[i + ooff] == FusedOp::SOURCE_OUTPUT);
+            assert(fused->outputs[my_off]->region ==
+                   old_op->outputs[i]->region);
+          }
+          ioff += fused->op_num_inputs[op];
+          woff += fused->op_num_weights[op];
+          ooff += fused->op_num_outputs[op];
+        }
+      } else {
+        bool found = false;
+        for (size_t i = 0; i < old_operators.size(); i++) {
+          if (old_operators[i] == operators[l]) {
+            assert(!found);
+            found = true;
+          }
+        }
+        assert(found);
+      }
+    }
+    fprintf(stderr, "%zu operators after fusion...\n", operators.size());
+    for (size_t i = 0; i < operators.size(); i++) {
+      Op *op = operators[i];
+      printf("operator[%zu]: type(%s) guid(%lu)\n",
+             i,
+             get_operator_type_name(operators[i]->op_type).c_str(),
+             operators[i]->op_guid);
+      for (int j = 0; j < op->numInputs; j++) {
+        LogicalRegion handle = op->inputs[j]->region;
+        printf("inputs[%d] region(%d,%d,%d)\n",
+               j,
+               handle.get_index_space().get_id(),
+               handle.get_field_space().get_id(),
+               handle.get_tree_id());
+      }
+      for (int j = 0; j < op->numOutputs; j++) {
+        LogicalRegion handle = op->outputs[j]->region;
+        printf("outputs[%d] region(%d,%d,%d)\n",
+               j,
+               handle.get_index_space().get_id(),
+               handle.get_field_space().get_id(),
+               handle.get_tree_id());
+      }
+      for (int j = 0; j < op->numWeights; j++) {
+        LogicalRegion handle = op->weights[j]->region;
+        printf("weights[%d] region(%d,%d,%d)\n",
+               j,
+               handle.get_index_space().get_id(),
+               handle.get_field_space().get_id(),
+               handle.get_tree_id());
+      }
+    }
+  }
+
+  {
+  printf("allreduce optimization\n");
+  FFModel *model = this;
+  TaskLauncher launcher2(ALLREDUCE_OPTIMIZE_TASK_ID,
+                          TaskArgument(&model, sizeof(FFModel *)));
+  Future future = runtime->execute_task(ctx, launcher2);
+  float saved_time = future.get_result<float>();
+  std::cout << "saved time: " << saved_time << std::endl;
+  }
+
+  Op *final_operator = get_final_operator();
+  // FIXME: currently assume the final operator has exactly one output
+  assert(final_operator->numOutputs == 1);
+  for (size_t i = 0; i < operators.size(); i++) {
+    Op *op = operators[i];
+    printf("operator[%zu]: type(%d)\n", i, operators[i]->op_type);
+    for (int j = 0; j < op->numInputs; j++) {
+      LogicalRegion handle = op->inputs[j]->region;
+      printf("inputs[%d] region(%d,%d,%d)\n",
+             j,
+             handle.get_index_space().get_id(),
+             handle.get_field_space().get_id(),
+             handle.get_tree_id());
+    }
+    for (int j = 0; j < op->numOutputs; j++) {
+      LogicalRegion handle = op->outputs[j]->region;
+      printf("outputs[%d] region(%d,%d,%d)\n",
+             j,
+             handle.get_index_space().get_id(),
+             handle.get_field_space().get_id(),
+             handle.get_tree_id());
+    }
+  }
+  // assert(final_operator->outputs[0].num_dims == 2);
+  ParallelDim p_dims[MAX_TENSOR_DIM];
+  int dims[MAX_TENSOR_DIM];
+  int num_p_dims = final_operator->outputs[0]->num_dims;
+  int num_dims = 0;
+  // FIXME: Currently assume 1st input for 1st operator = batch_size
+  for (int i = 0; i < num_p_dims; i++) {
+    p_dims[i] = final_operator->outputs[0]->dims[i];
+    if (!p_dims[i].is_replica_dim) {
+      dims[num_dims++] = p_dims[i].size;
+    }
+  }
+  DataType label_type = DT_FLOAT;
+  if (loss_type == LOSS_SPARSE_CATEGORICAL_CROSSENTROPY) {
+    // assign dims[num_dims-1] = 1 for sparse categorical labels
+    assert(p_dims[0].degree == 1);
+    p_dims[0].size = 1;
+    dims[0] = 1;
+    label_type = DT_INT32;
+  }
+  // create label tensor
+  switch (num_dims) {
+#define DIMFUNC(DIM)                                                           \
+  case DIM: {                                                                  \
+    label_tensor = create_tensor_legion_ordering(                              \
+        num_dims, dims, label_type, NULL, 0 /*idx*/, false /*create_grad*/);   \
+    parallel_label_tensor = create_parallel_tensor_legion_ordering(            \
+        num_p_dims, p_dims, label_type);                                       \
+    label_tensor->parallel_tensor = parallel_label_tensor;                     \
+    parallel_label_tensor->machine_view =                                      \
+        final_operator->outputs[0]->machine_view;                              \
+    map_tensor(parallel_label_tensor, parallel_label_tensor->owner_op);        \
+    break;                                                                     \
+  }
+    LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+    default: {
+      assert(false && "Unsupported dim");
+    }
+  }
+  // init optimizer
+  assert(optimizer != NULL);
+  optimizer->init();
+
+#ifdef FF_USE_NCCL
+  if (config.computationMode == COMP_MODE_TRAINING) {
+    // init all nccl communicators
+    for (size_t l = 0; l < operators.size(); l++) {
+      // Only create nccl for weights
+      if (operators[l]->op_type != OP_WEIGHT) {
+        continue;
+      }
+      MachineView view = operators[l]->outputs[0]->machine_view;
+      if (view_hash_to_nccl_comms.find(view.hash()) ==
+          view_hash_to_nccl_comms.end()) {
+        TaskLauncher launcher(NCCL_GETUNIQUEID_TASK_ID, TaskArgument(NULL, 0));
+        Future future = runtime->execute_task(ctx, launcher);
+        ncclUniqueId ncclId = future.get_result<ncclUniqueId>();
+        IndexSpace task_is = get_or_create_task_is(view);
+        ArgumentMap argmap;
+        IndexLauncher index_launcher(
+            NCCL_INIT_COMMS_TASK_ID,
+            task_is,
+            TaskArgument(&ncclId, sizeof(ncclUniqueId)),
+            argmap,
+            Predicate::TRUE_PRED,
+            false /*must*/,
+            0 /*mapper_id*/,
+            view.hash() /*MappingTagID*/);
+        FutureMap fm = runtime->execute_index_space(ctx, index_launcher);
+        fm.wait_all_results();
+        int idx = 0;
+        Domain task_domain = runtime->get_index_space_domain(ctx, task_is);
+        ncclComm_t *nccl_comms =
+            (ncclComm_t *)malloc(sizeof(ncclComm_t) * task_domain.get_volume());
+        for (Domain::DomainPointIterator it(task_domain); it; it++, idx++) {
+          nccl_comms[idx] = fm.get_result<ncclComm_t>(*it);
+        }
+        view_hash_to_nccl_comms[view.hash()] = nccl_comms;
+      }
+    }
+  }
+#endif
+}
+
+void FFModel::virtual_compile_with_optimizaiton(LossType loss_type,
+                                                std::vector<MetricsType> const &metrics,
+                                                CompMode comp_mode) {
+  if (metrics_input == -1) {
+    metrics_input = operators.size() - 1;
+  }
+  {
+    FFModel *model = this;
+    if (model->config.search_num_nodes.has_value()) {
+      model->config.numNodes = model->config.search_num_nodes.value();
+    }
+    if (model->config.search_num_workers.has_value()) {
+      model->config.workersPerNode = model->config.search_num_workers.value();
+    }
+  }
+  Context ctx = config.lg_ctx;
+  Runtime *runtime = config.lg_hlr;
+  config.computationMode = comp_mode;
+  // if (config.import_strategy_file.length() > 0) {
+  //   load_strategies_from_file(config.import_strategy_file,
+  //   config.strategies);
+  // }
+  //  Construct operators from layers
+  if (config.only_data_parallel) {
+    fprintf(stderr,
+            "Note: only_data_parallel is specified, FlexFlow compiles a "
+            "data-parallel PCG.\n");
+  }
+  create_operators_from_layers();
+  // Launch the graph optimize task
+  {
+    FFModel *model = this;
+    TaskLauncher launcher(GRAPH_OPTIMIZE_TASK_ID,
+                          TaskArgument(&model, sizeof(FFModel *)));
+    Future future = runtime->execute_task(ctx, launcher);
+
+    PCG::GraphOptimalViewSerialized ret =
+        future.get_result<PCG::GraphOptimalViewSerialized>();
+    Deserializer dez(ret.data, ret.total_bytes);
+    // Reconstruct operators
+    PCG::Graph *best_graph = new PCG::Graph(this);
+    std::unordered_map<PCG::Node, MachineView> optimal_views;
+    deserialize_graph_optimal_view(dez, best_graph, optimal_views);
+    operators.clear();
+    convert_graph_to_operators(best_graph, optimal_views);
+    best_graph->print_dot();
+    delete best_graph;
+    for (auto const &layer : layers) {
+      // map inputs to parallel tensor
+      if (layer->op_type == OP_INPUT) {
+        Tensor tensor = layer->outputs[0];
+        ParallelTensor parallel_tensor = nullptr;
+        for (auto const &op : operators) {
+          if (op->op_type == OP_INPUT) {
+            NoOp *noop = (NoOp *)op;
+            if (noop->input_tensor_guid == tensor->tensor_guid) {
+              parallel_tensor = op->outputs[0];
+            }
+          }
+        }
+        assert(parallel_tensor != nullptr);
+        tensor->parallel_tensor = parallel_tensor;
+      }
+      // map weights to parallel_tensor
+      for (int i = 0; i < layer->numWeights; i++) {
+        assert(layer->weights[i] != nullptr);
+        Tensor weight = layer->weights[i];
+        ParallelTensor parallel_weight = nullptr;
+        for (auto const &op : operators) {
+          if (op->layer_guid == layer->layer_guid) {
+            assert(op->op_type == layer->op_type);
+            assert(op->numWeights == layer->numWeights);
+            parallel_weight = op->weights[i];
+          }
+        }
+        assert(parallel_weight != nullptr);
+        weight->parallel_tensor = parallel_weight;
+      }
+    }
+  }
+
+  bool repl_labels = (operators[operators.size() - 1]->op_type == OP_AGG_SPEC);
+  loss_op = new Loss(loss_type, repl_labels);
+  metrics_op = new Metrics(loss_type, metrics);
+
+  // Init performance metrics
+  TaskLauncher launcher(UPDATE_METRICS_TASK_ID,
+                        TaskArgument(metrics_op, sizeof(Metrics)));
+  current_metrics = runtime->execute_task(ctx, launcher);
+
+  // Perform inplace optimizations
+  if (config.enable_inplace_optimizations) {
+    for (size_t l = 1; l < operators.size(); l++) {
+      if (operators[l]->can_inplace_output()) {
+        // Assume outputs[0] is inplace with inputs[0]
+        assert(operators[l]->numOutputs == 1);
+        if (operators[l]->inputs[0]->owner_op != NULL) {
+          // int dim1 = operators[l]->outputs[0]->num_dims;
+          // int dim2 = operators[l]->inputs[0]->num_dims;
+          MachineView view1 = operators[l]->outputs[0]->machine_view;
+          MachineView view2 = operators[l]->inputs[0]->machine_view;
+          if (view1 == view2) {
+            // Check no others also need operators[l]->inputs[0]
+            bool found = false;
+            for (size_t i = 0; i < operators.size(); i++) {
+              if (i == l) {
+                continue;
+              }
+              for (int j = 0; j < operators[i]->numInputs; j++) {
+                if ((operators[i]->inputs[j]->owner_op ==
+                     operators[l]->inputs[0]->owner_op) &&
+                    (operators[i]->inputs[j]->owner_idx ==
+                     operators[l]->inputs[0]->owner_idx)) {
+                  found = true;
+                }
+              }
+            }
+            if (!found) {
+              // Perform inplace
+              operators[l]->do_inplace_output();
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 这里大概是创建tensor实例 但在debug的情况下我们不需要
+  // for (size_t l = 0; l < operators.size(); l++) {
+  //   Op *op = operators[l];
+  //   for (int i = 0; i < op->numInputs; i++) {
+  //     assert(op->inputs[i]->owner_op != NULL);
+  //   }
+  //   for (int i = 0; i < op->numWeights; i++) {
+  //     assert(op->weights[i]->owner_op != NULL);
+  //     assert(op->weights[i]->region != LogicalRegion::NO_REGION);
+  //     parameters.push_back(op->weights[i]);
+  //   }
+  //   op->map_output_tensors(*this);
+  //   // for (int i = 0; i < op->numOutputs; i++) {
+  //   //   // Output tensor
+  //   //   map_tensor(op->outputs[i], op);
+  //   // }
+  //   if (op->is_parallel_op()) {
+  //     ((ParallelOp *)op)->create_input_partition(*this);
+  //   }
+  //   // op->map_output_tensors(*this);
+  // }
+
+  // 理由同上
+  // Check correctness
+  // for (size_t l = 0; l < operators.size(); l++) {
+  //   Op *op = operators[l];
+  //   for (int i = 0; i < op->numOutputs; i++) {
+  //     assert(op->outputs[i]->owner_op == op);
+  //     assert(op->outputs[i]->owner_idx == i);
+  //     assert(op->outputs[i]->parallel_tensor_guid != 0);
+  //   }
+  // }
 
   // If an operator's input is training data
   // No need to compute its gradients
@@ -3082,89 +3477,101 @@ void FFModel::compile(LossType loss_type,
              handle.get_tree_id());
     }
   }
-  // assert(final_operator->outputs[0].num_dims == 2);
-  ParallelDim p_dims[MAX_TENSOR_DIM];
-  int dims[MAX_TENSOR_DIM];
-  int num_p_dims = final_operator->outputs[0]->num_dims;
-  int num_dims = 0;
-  // FIXME: Currently assume 1st input for 1st operator = batch_size
-  for (int i = 0; i < num_p_dims; i++) {
-    p_dims[i] = final_operator->outputs[0]->dims[i];
-    if (!p_dims[i].is_replica_dim) {
-      dims[num_dims++] = p_dims[i].size;
-    }
-  }
-  DataType label_type = DT_FLOAT;
-  if (loss_type == LOSS_SPARSE_CATEGORICAL_CROSSENTROPY) {
-    // assign dims[num_dims-1] = 1 for sparse categorical labels
-    assert(p_dims[0].degree == 1);
-    p_dims[0].size = 1;
-    dims[0] = 1;
-    label_type = DT_INT32;
-  }
-  // create label tensor
-  switch (num_dims) {
-#define DIMFUNC(DIM)                                                           \
-  case DIM: {                                                                  \
-    label_tensor = create_tensor_legion_ordering(                              \
-        num_dims, dims, label_type, NULL, 0 /*idx*/, false /*create_grad*/);   \
-    parallel_label_tensor = create_parallel_tensor_legion_ordering(            \
-        num_p_dims, p_dims, label_type);                                       \
-    label_tensor->parallel_tensor = parallel_label_tensor;                     \
-    parallel_label_tensor->machine_view =                                      \
-        final_operator->outputs[0]->machine_view;                              \
-    map_tensor(parallel_label_tensor, parallel_label_tensor->owner_op);        \
-    break;                                                                     \
-  }
-    LEGION_FOREACH_N(DIMFUNC)
-#undef DIMFUNC
-    default: {
-      assert(false && "Unsupported dim");
-    }
-  }
-  // init optimizer
-  assert(optimizer != NULL);
-  optimizer->init();
+  printf("virtual compilation completed...\n");
 
-#ifdef FF_USE_NCCL
-  if (config.computationMode == COMP_MODE_TRAINING) {
-    // init all nccl communicators
-    for (size_t l = 0; l < operators.size(); l++) {
-      // Only create nccl for weights
-      if (operators[l]->op_type != OP_WEIGHT) {
-        continue;
-      }
-      MachineView view = operators[l]->outputs[0]->machine_view;
-      if (view_hash_to_nccl_comms.find(view.hash()) ==
-          view_hash_to_nccl_comms.end()) {
-        TaskLauncher launcher(NCCL_GETUNIQUEID_TASK_ID, TaskArgument(NULL, 0));
-        Future future = runtime->execute_task(ctx, launcher);
-        ncclUniqueId ncclId = future.get_result<ncclUniqueId>();
-        IndexSpace task_is = get_or_create_task_is(view);
-        ArgumentMap argmap;
-        IndexLauncher index_launcher(
-            NCCL_INIT_COMMS_TASK_ID,
-            task_is,
-            TaskArgument(&ncclId, sizeof(ncclUniqueId)),
-            argmap,
-            Predicate::TRUE_PRED,
-            false /*must*/,
-            0 /*mapper_id*/,
-            view.hash() /*MappingTagID*/);
-        FutureMap fm = runtime->execute_index_space(ctx, index_launcher);
-        fm.wait_all_results();
-        int idx = 0;
-        Domain task_domain = runtime->get_index_space_domain(ctx, task_is);
-        ncclComm_t *nccl_comms =
-            (ncclComm_t *)malloc(sizeof(ncclComm_t) * task_domain.get_volume());
-        for (Domain::DomainPointIterator it(task_domain); it; it++, idx++) {
-          nccl_comms[idx] = fm.get_result<ncclComm_t>(*it);
-        }
-        view_hash_to_nccl_comms[view.hash()] = nccl_comms;
-      }
-    }
+  
+  {
+  printf("allreduce optimization\n");
+  FFModel *model = this;
+  TaskLauncher launcher2(ALLREDUCE_OPTIMIZE_TASK_ID,
+                          TaskArgument(&model, sizeof(FFModel *)));
+  Future future = runtime->execute_task(ctx, launcher2);
+  float saved_time = future.get_result<float>();
+  std::cout << "saved time: " << saved_time << std::endl;
   }
-#endif
+  // assert(final_operator->outputs[0].num_dims == 2);
+//  ParallelDim p_dims[MAX_TENSOR_DIM];
+//  int dims[MAX_TENSOR_DIM];
+//  int num_p_dims = final_operator->outputs[0]->num_dims;
+//  int num_dims = 0;
+//  // FIXME: Currently assume 1st input for 1st operator = batch_size
+//  for (int i = 0; i < num_p_dims; i++) {
+//    p_dims[i] = final_operator->outputs[0]->dims[i];
+//    if (!p_dims[i].is_replica_dim) {
+//      dims[num_dims++] = p_dims[i].size;
+//    }
+//  }
+//  DataType label_type = DT_FLOAT;
+//  if (loss_type == LOSS_SPARSE_CATEGORICAL_CROSSENTROPY) {
+//    // assign dims[num_dims-1] = 1 for sparse categorical labels
+//    assert(p_dims[0].degree == 1);
+//    p_dims[0].size = 1;
+//    dims[0] = 1;
+//    label_type = DT_INT32;
+//  }
+//  // create label tensor
+//  switch (num_dims) {
+//#define DIMFUNC(DIM)                                                           \
+//  case DIM: {                                                                  \
+//    label_tensor = create_tensor_legion_ordering(                              \
+//        num_dims, dims, label_type, NULL, 0 /*idx*/, false /*create_grad*/);   \
+//    parallel_label_tensor = create_parallel_tensor_legion_ordering(            \
+//        num_p_dims, p_dims, label_type);                                       \
+//    label_tensor->parallel_tensor = parallel_label_tensor;                     \
+//    parallel_label_tensor->machine_view =                                      \
+//        final_operator->outputs[0]->machine_view;                              \
+//    map_tensor(parallel_label_tensor, parallel_label_tensor->owner_op);        \
+//    break;                                                                     \
+//  }
+//    LEGION_FOREACH_N(DIMFUNC)
+//#undef DIMFUNC
+//    default: {
+//      assert(false && "Unsupported dim");
+//    }
+//  }
+//  // init optimizer
+//  assert(optimizer != NULL);
+//  optimizer->init();
+
+//#ifdef FF_USE_NCCL
+//  if (config.computationMode == COMP_MODE_TRAINING) {
+//    // init all nccl communicators
+//    for (size_t l = 0; l < operators.size(); l++) {
+//      // Only create nccl for weights
+//      if (operators[l]->op_type != OP_WEIGHT) {
+//        continue;
+//      }
+//      MachineView view = operators[l]->outputs[0]->machine_view;
+//      if (view_hash_to_nccl_comms.find(view.hash()) ==
+//          view_hash_to_nccl_comms.end()) {
+//        TaskLauncher launcher(NCCL_GETUNIQUEID_TASK_ID, TaskArgument(NULL, 0));
+//        Future future = runtime->execute_task(ctx, launcher);
+//        ncclUniqueId ncclId = future.get_result<ncclUniqueId>();
+//        IndexSpace task_is = get_or_create_task_is(view);
+//        ArgumentMap argmap;
+//        IndexLauncher index_launcher(
+//            NCCL_INIT_COMMS_TASK_ID,
+//            task_is,
+//            TaskArgument(&ncclId, sizeof(ncclUniqueId)),
+//            argmap,
+//            Predicate::TRUE_PRED,
+//            false /*must*/,
+//            0 /*mapper_id*/,
+//            view.hash() /*MappingTagID*/);
+//        FutureMap fm = runtime->execute_index_space(ctx, index_launcher);
+//        fm.wait_all_results();
+//        int idx = 0;
+//        Domain task_domain = runtime->get_index_space_domain(ctx, task_is);
+//        ncclComm_t *nccl_comms =
+//            (ncclComm_t *)malloc(sizeof(ncclComm_t) * task_domain.get_volume());
+//        for (Domain::DomainPointIterator it(task_domain); it; it++, idx++) {
+//          nccl_comms[idx] = fm.get_result<ncclComm_t>(*it);
+//        }
+//        view_hash_to_nccl_comms[view.hash()] = nccl_comms;
+//      }
+//    }
+//  }
+//#endif
 }
 
 struct PropagationEdgeInfo {
@@ -3450,6 +3857,56 @@ void Op::prefetch(FFModel const &ff) {
   // TODO: perform prefetch for performance imporvement
 }
 
+float allreduce_optimize(Legion::Task const *task,
+                        std::vector<Legion::PhysicalRegion> const &regions,
+                        Legion::Context ctx,
+                        Legion::Runtime *runtime) {
+  FFModel *model = (*((FFModel **)task->args));
+  Memory gpu_mem = Machine::MemoryQuery(Machine::get_machine())
+         .only_kind(Memory::GPU_FB_MEM).best_affinity_to(task->target_proc).first();
+
+  printf("memory got\n");
+  //FatTreeTopologyGenerator topo = FatTreeTopologyGenerator(16,8,4,4,32,32,
+  //    std::vector<int>{0,1,2,3,12,13,14,15});
+//
+  //NetworkedMachineModel machine = NetworkedMachineModel(8, 8, 20, 0.0001f, 
+  //    topo.generate_topology(), gpu_mem.capacity(), 12.0*1024*1024);
+  //printf("network model complete\n");
+  //
+  //TaskManager task_manager = TaskManager(65536*4);
+//
+  //printf("task manager\n");
+
+  FatTreeTopologyGenerator topo2 = FatTreeTopologyGenerator(16,8,4,4,32,32,
+  std::vector<int>{0,1,2,3,12,13,14,15});
+  topo2.print_conn_matrix(topo2.generate_topology(), 8, 20);
+  CustomTopologyGenerator topo = CustomTopologyGenerator(model->topo_file);
+  printf("topo custom begin\n");
+  topo.print_conn_matrix(topo.generate_topology(), topo.num_nodes, topo.num_switches);
+  printf("topo custom end\n");
+  NetworkedMachineModel machine = NetworkedMachineModel(topo.num_nodes, topo.gpu_per_node, topo.num_switches, 0.0001f, topo.generate_topology(), gpu_mem.capacity(), 12.0*1024*1024);
+
+
+  std::map<Op const *, ParallelConfig> global;
+  for(int i = 0; i < model->operators.size(); i++) {
+    global.insert(std::pair<Op const *, ParallelConfig>(model->operators[i],
+        model->operators[i]->view_to_pc(model->operators[i]->outputs[0]->machine_view)));
+  }
+
+  printf("parallel config set\n");
+
+  LogicalTaskgraphBasedSimulator sim = LogicalTaskgraphBasedSimulator(model, model->handlers[0], gpu_mem, &machine);
+  sim.warmup_times = 5;
+  sim.repeat_times = model->config.batchSize;
+  printf("begin simulation\n");
+  float sim_time1 = sim.simulation_with_network(model, global, CompMode::COMP_MODE_TRAINING, "originalSimulator.log");
+  std::cout << "before: " << sim_time1 << std::endl;
+  sleep(10);
+  float sim_time2 = sim.simulation_with_allreduce_optimize(model, global, CompMode::COMP_MODE_TRAINING, model->parameters,"taskSimulator.log");
+  std::cout << "before: " << sim_time1 << " after: " << sim_time2 << std::endl;
+  return sim_time1-sim_time2;
+}
+
 // ========================================================
 // class FFIterationConfig
 // ========================================================
@@ -3467,7 +3924,7 @@ void FFIterationConfig::reset() {
 
 // Default Config Parameters
 struct DefaultConfig {
-  const static int epochs = 1;
+  const static int epochs = 40;
   // const static int iterations = 1;
   const static int batchSize = 64;
   const static bool profiling = false;
@@ -3563,6 +4020,10 @@ void FFConfig::parse_args(char **argv, int argc) {
     //   iterations = atoi(argv[++i]);
     //   continue;
     // }
+    if ((!strcmp(argv[i], "--topo-file"))) {
+      topo_file = argv[++i];
+      continue;
+    }
     if ((!strcmp(argv[i], "-b")) || (!strcmp(argv[i], "--batch-size"))) {
       batchSize = atoi(argv[++i]);
       continue;
@@ -4619,6 +5080,14 @@ void register_flexflow_internal_tasks() {
     Runtime::preregister_task_variant<PCG::GraphOptimalViewSerialized,
                                       PCG::Graph::graph_optimize_task>(
         registrar, "Graph Optimize Task");
+  }
+  // Allreduce optimize
+  {
+    TaskVariantRegistrar registrar(ALLREDUCE_OPTIMIZE_TASK_ID, "Graph Optimize");
+    registrar.add_constraint(ProcessorConstraint(Processor::TOC_PROC));
+    registrar.set_leaf();
+    Runtime::preregister_task_variant<float,allreduce_optimize>(
+        registrar, "Allreduce Optimize Task");
   }
   // Parameter Server Prefetch task
   {

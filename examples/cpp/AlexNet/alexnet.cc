@@ -78,8 +78,8 @@ void FlexFlow::top_level_task(Task const *task,
   t = ff.conv2d(t, 256, 3, 3, 1, 1, 1, 1, AC_MODE_RELU);
   t = ff.pool2d(t, 3, 3, 2, 2, 0, 0);
   t = ff.flat(t);
-  t = ff.dense(t, 4096, AC_MODE_RELU /*relu*/);
-  t = ff.dense(t, 4096, AC_MODE_RELU /*relu*/);
+  t = ff.dense(t, 128, AC_MODE_RELU /*relu*/);
+  t = ff.dense(t, 128, AC_MODE_RELU /*relu*/);
   t = ff.dense(t, 10);
   t = ff.softmax(t);
   Optimizer *optimizer = new SGDOptimizer(&ff, 0.001f);
