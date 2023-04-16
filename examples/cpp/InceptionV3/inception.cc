@@ -178,7 +178,9 @@ void FlexFlow::top_level_task(Task const *task,
   metrics.push_back(METRICS_ACCURACY);
   metrics.push_back(METRICS_SPARSE_CATEGORICAL_CROSSENTROPY);
   ff.compile(optimizer, LOSS_SPARSE_CATEGORICAL_CROSSENTROPY, metrics);
-
+  for(auto p: ff.parameters) {
+    p->should_add_barrier = true;
+  }
   // Data Loader
   /* DataLoader data_loader(ff, inceptionConfig, input, ff.label_tensor); */
   ff.init_operators();
@@ -192,9 +194,16 @@ void FlexFlow::top_level_task(Task const *task,
   double ts_start = Realm::Clock::current_time_in_microseconds();
   for (int epoch = 0; epoch < ffConfig.epochs; epoch++) {
     /* data_loader.reset(); */
-    ff.reset_metrics();
+    //ff.reset_metrics();
     /* int iterations = data_loader.num_samples / ffConfig.batchSize; */
-    int iterations = 128;
+    int iterations = 16;
+    runtime->begin_trace(ctx, 111 /*trace_id*/);
+    ff.forward();
+    ff.zero_gradients();
+    ff.backward();
+    ff.update();
+    runtime->issue_execution_fence(ctx);
+    runtime->end_trace(ctx, 111 /*trace_id*/);
 
     for (int iter = 0; iter < iterations; iter++) {
       /* if (inceptionConfig.dataset_path.length() == 0) { */
@@ -204,16 +213,13 @@ void FlexFlow::top_level_task(Task const *task,
       /* } else { */
       /*   data_loader.next_batch(ff); */
       /* } */
-      if (epoch > 0) {
-        runtime->begin_trace(ctx, 111 /*trace_id*/);
-      }
+      runtime->begin_trace(ctx, 111 /*trace_id*/);
       ff.forward();
       ff.zero_gradients();
       ff.backward();
       ff.update();
-      if (epoch > 0) {
-        runtime->end_trace(ctx, 111 /*trace_id*/);
-      }
+      runtime->issue_execution_fence(ctx);
+      runtime->end_trace(ctx, 111 /*trace_id*/);
     }
   }
   // End timer
@@ -227,6 +233,9 @@ void FlexFlow::top_level_task(Task const *task,
   double run_time = 1e-6 * (ts_end - ts_start);
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
+         8192 * ffConfig.epochs / run_time);
+  printf("ITERATION TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
+         run_time/16/ffConfig.epochs,
          8192 * ffConfig.epochs / run_time);
 }
 

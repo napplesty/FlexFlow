@@ -1291,7 +1291,7 @@ float LogicalTaskgraphBasedSimulator::simulate_runtime(
   task_manager->reset();
   std::unordered_map<SimTask *, Op *> task_to_op;
   // Step 1: register forward and backward tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     CostMetrics cost_metrics = measure_operator_cost(op, config);
@@ -1316,7 +1316,7 @@ float LogicalTaskgraphBasedSimulator::simulate_runtime(
     }
   }
 
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     size_t element_size = data_type_size(DT_FLOAT);
@@ -1356,7 +1356,7 @@ float LogicalTaskgraphBasedSimulator::simulate_runtime(
   }
 
   // Step 2: insert dependencies and comm. tasks before compute tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     for (int j = 0; j < op->numInputs; j++) {
@@ -1472,7 +1472,7 @@ float LogicalTaskgraphBasedSimulator::simulate_runtime(
   // Step 6: add penalty to strategies that exceed the memory limits on devices
   // std::vector<size_t> gpu_mem_usage(machine->get_num_gpus(), 0);
   // float memory_penalty = 0.0f;
-  // for (size_t l = 0; l < model->layers.size(); l++) {
+  // for (size_t l = 0; l < model->operators.size(); l++) {
   //   Op* op = model->layers[l];
   //   ParallelConfig config = global.find(op)->second;
   //   CostMetrics cost_metrics = measure_operator_cost(op, config);
@@ -1514,8 +1514,8 @@ float LogicalTaskgraphBasedSimulator::simulation_with_network(
   task_manager->reset();
   std::unordered_map<SimTask *, Op *> task_to_op;
   // Step 1: register forward and backward tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
-    printf("mesuring op time [%ld/%ld]. op name: %s\n", l+1,model->layers.size(), model->operators[l]->name);
+  for (size_t l = 0; l < model->operators.size(); l++) {
+    printf("mesuring op time [%ld/%ld]. op name: %s\n", l+1,model->operators.size(), model->operators[l]->name);
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     CostMetrics cost_metrics = measure_operator_cost(op, config);
@@ -1540,7 +1540,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_network(
     }
   }
 
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     size_t element_size = data_type_size(DT_FLOAT);
@@ -1580,7 +1580,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_network(
   }
 
   // Step 2: insert dependencies and comm. tasks before compute tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     for (int j = 0; j < op->numInputs; j++) {
@@ -1702,15 +1702,12 @@ float LogicalTaskgraphBasedSimulator::simulation_with_network(
     for (size_t i = 0; i < cur_task->next_tasks.size(); i++) {
       SimTask *next = cur_task->next_tasks[i];
       if(cur_task->type != SimTask::TASK_COMM && cur_task->type != SimTask::TASK_NOMINAL_COMM) { 
-        next->ready_time = std::max(next->ready_time, end_time+std::max(2.5f-cur_task->run_time,0.0f)); // legion调度的问题
+        next->ready_time = std::max(next->ready_time, end_time+std::max(1.0f-end_time+start_time,0.0f)); // legion调度的问题
       } else {
         next->ready_time = std::max(next->ready_time, end_time);
       }
       next->counter--;
       if (next->counter == 0) {
-        if(next->type == SimTask::TASK_BARRIER) {
-          next->ready_time = 0;
-        }
         ready_queue.push(next);
       }
     }
@@ -1732,8 +1729,8 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
   task_manager->reset();
   std::unordered_map<SimTask *, Op *> task_to_op;
   // Step 1: register forward and backward tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
-    printf("mesuring op time [%ld/%ld]\n", l+1,model->layers.size());
+  for (size_t l = 0; l < model->operators.size(); l++) {
+    printf("mesuring op time [%ld/%ld]\n", l+1,model->operators.size());
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     CostMetrics cost_metrics = measure_operator_cost(op, config);
@@ -1758,7 +1755,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
     }
   }
 
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     size_t element_size = data_type_size(DT_FLOAT);
@@ -1798,7 +1795,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
   }
 
   // Step 2: insert dependencies and comm. tasks before compute tasks
-  for (size_t l = 0; l < model->layers.size(); l++) {
+  for (size_t l = 0; l < model->operators.size(); l++) {
     Op *op = model->operators[l];
     ParallelConfig config = global.find(op)->second;
     for (int j = 0; j < op->numInputs; j++) {
@@ -1952,15 +1949,12 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
     for (size_t i = 0; i < cur_task->next_tasks.size(); i++) {
       SimTask *next = cur_task->next_tasks[i];
       if(cur_task->type != SimTask::TASK_COMM && cur_task->type != SimTask::TASK_NOMINAL_COMM) { 
-        next->ready_time = std::max(next->ready_time, end_time+std::max(2.5f-cur_task->run_time,0.0f)); // legion调度的问题
+        next->ready_time = std::max(next->ready_time, end_time+std::max(1.0f-end_time+start_time,0.0f)); // legion调度的问题
       } else {
         next->ready_time = std::max(next->ready_time, end_time);
       }
       next->counter--;
       if (next->counter == 0) {
-        if(next->type == SimTask::TASK_BARRIER) {
-          next->ready_time = 0;
-        }
         ready_queue.push(next);
       }
     }

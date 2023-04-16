@@ -77,10 +77,10 @@ void create_attention_encoder_decoder(FFModel *model,
 }
 
 TransformerConfig::TransformerConfig(void) {
-  hidden_size = 1024;
-  embedding_size = 1024;
-  num_heads = 16;
-  num_layers = 12;
+  hidden_size = 512;
+  embedding_size = 512;
+  num_heads = 8;
+  num_layers = 6;
   sequence_length = 512;
 }
 
@@ -162,6 +162,11 @@ void FlexFlow::top_level_task(Task const *task,
   // metrics.push_back(METRICS_MEAN_SQUARED_ERROR);
   ff.compile(optimizer, LOSS_MEAN_SQUARED_ERROR_AVG_REDUCE, metrics);
   // Data Loader
+
+  for(auto p: ff.parameters) {
+    printf("parameter sync: %d\n",p->should_add_barrier);
+    //p->should_add_barrier = true;
+  }
   DataLoader loader(ff, tfConfig, input, ff.label_tensor);
   loader.next_batch(ff);
   loader.reset();
@@ -183,7 +188,7 @@ void FlexFlow::top_level_task(Task const *task,
   for (int epoch = 0; epoch < ffConfig.epochs; epoch++) {
     loader.reset();
     ff.reset_metrics();
-    int iterations = loader.num_samples / ffConfig.batchSize;
+    int iterations = 128;
     for (int iter = 0; iter < iterations; iter++) {
       // Only load data once for random input
       if (iter == 0 && epoch == 0) {
@@ -194,6 +199,7 @@ void FlexFlow::top_level_task(Task const *task,
       ff.zero_gradients();
       ff.backward();
       ff.update();
+      runtime->issue_execution_fence(ctx);
       runtime->end_trace(ctx, 111 /*trace_id*/);
     }
   }
@@ -209,6 +215,9 @@ void FlexFlow::top_level_task(Task const *task,
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
          loader.num_samples * ffConfig.epochs / run_time);
+  printf("ITERATION TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
+         run_time/128/ffConfig.epochs,
+         128 * ffConfig.batchSize * ffConfig.epochs / run_time);
 }
 
 DataLoader::DataLoader(FFModel &ff,

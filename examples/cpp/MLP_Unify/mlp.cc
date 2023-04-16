@@ -34,10 +34,10 @@ void FlexFlow::top_level_task(Task const *task,
   FFModel ff(ffConfig);
 
   std::vector<int> hidden_dims = {
-      4096, 4096, 4096, 4096, 4096, 4096, 4096, 4096};
+      4, 4, 4, 4, 4, 4, 4};
   Tensor input1, input2;
   {
-    int const dims[] = {ffConfig.batchSize, 1024};
+    int const dims[] = {ffConfig.batchSize, 4};
     input1 = ff.create_tensor<2>(dims, DT_FLOAT);
     input2 = ff.create_tensor<2>(dims, DT_FLOAT);
   }

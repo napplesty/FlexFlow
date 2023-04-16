@@ -118,6 +118,11 @@ void FlexFlow::top_level_task(Task const *task,
   ff.compile(optimizer, LOSS_SPARSE_CATEGORICAL_CROSSENTROPY, metrics);
   // Data Loader
   /* DataLoader data_loader(ff, resnetConfig, input, ff.label_tensor); */
+
+  for(auto p: ff.parameters) {
+    printf("parameter sync: %d\n",p->should_add_barrier);
+    //p->should_add_barrier = true;
+  }
   ff.init_operators();
   // Start timer
   {
@@ -145,6 +150,7 @@ void FlexFlow::top_level_task(Task const *task,
       ff.zero_gradients();
       ff.backward();
       ff.update();
+      runtime->issue_execution_fence(ctx);
       runtime->end_trace(ctx, 111 /*trace_id*/);
     }
   }
@@ -159,6 +165,9 @@ void FlexFlow::top_level_task(Task const *task,
   double run_time = 1e-6 * (ts_end - ts_start);
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
+         128 * ffConfig.batchSize * ffConfig.epochs / run_time);
+  printf("ITERATION TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
+         run_time/128/ffConfig.epochs,
          128 * ffConfig.batchSize * ffConfig.epochs / run_time);
 }
 

@@ -124,6 +124,7 @@ void FlexFlow::top_level_task(Task const *task,
       ff.zero_gradients();
       ff.backward();
       ff.update();
+      runtime->issue_execution_fence(ctx);
       runtime->end_trace(ctx, 111 /*trace_id*/);
     }
   }

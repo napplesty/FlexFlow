@@ -75,7 +75,7 @@ Tensor create_emb(FFModel *model,
                               input_dim,
                               output_dim,
                               AGGR_MODE_SUM,
-                              DT_HALF /*dtype*/,
+                              DT_FLOAT /*dtype*/,
                               NULL /*weight_sharing*/,
                               embed_init);
   return model->cast(t, DT_FLOAT);
@@ -174,6 +174,10 @@ void FlexFlow::top_level_task(Task const *task,
   // metrics.push_back(METRICS_MEAN_SQUARED_ERROR);
   ff.compile(optimizer, LOSS_MEAN_SQUARED_ERROR_AVG_REDUCE, metrics);
   // Data Loader
+  for(auto p: ff.parameters) {
+    printf("parameter sync: %d\n",p->should_add_barrier);
+    //p->should_add_barrier = true;
+  }
   DataLoader data_loader(
       ff, dlrmConfig, sparse_inputs, dense_input, ff.label_tensor);
   ff.init_operators();
@@ -186,7 +190,7 @@ void FlexFlow::top_level_task(Task const *task,
     ff.forward();
     ff.zero_gradients();
     ff.backward();
-    // ff.update();
+    ff.update();
   }
 
   // Start timer
@@ -205,7 +209,7 @@ void FlexFlow::top_level_task(Task const *task,
   for (int epoch = 0; epoch < ffConfig.epochs; epoch++) {
     data_loader.reset();
     ff.reset_metrics();
-    int iterations = data_loader.num_samples / ffConfig.batchSize;
+    int iterations = 128;
     for (int iter = 0; iter < iterations; iter++) {
       if (dlrmConfig.dataset_path.length() == 0) {
         // Only load data once for random input
@@ -220,7 +224,8 @@ void FlexFlow::top_level_task(Task const *task,
       ff.forward();
       ff.zero_gradients();
       ff.backward();
-      // ff.update();
+      ff.update();
+      runtime->issue_execution_fence(ctx);
       if (epoch > 0) {
         runtime->end_trace(ctx, 111 /*trace_id*/);
       }
@@ -238,6 +243,9 @@ void FlexFlow::top_level_task(Task const *task,
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
          data_loader.num_samples * ffConfig.epochs / run_time);
+  printf("ITERATION TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
+         run_time/128/ffConfig.epochs,
+         128 * ffConfig.batchSize * ffConfig.epochs / run_time);
 }
 
 void parse_input_args(char **argv, int argc, DLRMConfig &config) {
