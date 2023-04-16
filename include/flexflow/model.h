@@ -856,6 +856,7 @@ public:
   ParallelTensor parallel_label_tensor;
   Tensor label_tensor;
   std::string topo_file;
+  int iteration_time=16;
 
   std::vector<Layer *> layers;
   std::vector<Op *> operators;

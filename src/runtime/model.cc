@@ -1173,6 +1173,7 @@ FFModel::FFModel(FFConfig &_config)
       topo_file(_config.topo_file) {
   this->search = new PCG::SearchHelper(this);
   this->graph_search = new PCG::GraphSearchHelper(this);
+  this->iteration_time = _config.iteration_time;
 
   Runtime *runtime = config.lg_hlr;
   Context ctx = config.lg_ctx;
@@ -2821,6 +2822,17 @@ void FFModel::compile(LossType loss_type,
   //   config.strategies);
   // }
   //  Construct operators from layers
+
+  {
+    FFModel *model = this;
+    if (model->config.search_num_nodes.has_value()) {
+      model->config.numNodes = model->config.search_num_nodes.value();
+    }
+    if (model->config.search_num_workers.has_value()) {
+      model->config.workersPerNode = model->config.search_num_workers.value();
+    }
+  }
+
   if (config.only_data_parallel) {
     fprintf(stderr,
             "Note: only_data_parallel is specified, FlexFlow compiles a "
@@ -3884,7 +3896,9 @@ float allreduce_optimize(Legion::Task const *task,
   printf("topo custom begin\n");
   topo.print_conn_matrix(topo.generate_topology(), topo.num_nodes, topo.num_switches);
   printf("topo custom end\n");
-  NetworkedMachineModel machine = NetworkedMachineModel(topo.num_nodes, topo.gpu_per_node, topo.num_switches, 0.0001f, topo.generate_topology(), gpu_mem.capacity(), 12.0*1024*1024);
+
+  printf("sim config: %d %d %d \n", topo.num_nodes, topo.gpu_per_node, topo.num_switches);
+  NetworkedMachineModel machine = NetworkedMachineModel(topo.num_nodes, topo.gpu_per_node, topo.num_switches, 0.001f, topo.generate_topology(), gpu_mem.capacity(), 12.0*1024*1024);
 
 
   std::map<Op const *, ParallelConfig> global;
@@ -3896,8 +3910,8 @@ float allreduce_optimize(Legion::Task const *task,
   printf("parallel config set\n");
 
   LogicalTaskgraphBasedSimulator sim = LogicalTaskgraphBasedSimulator(model, model->handlers[0], gpu_mem, &machine);
-  sim.warmup_times = 5;
-  sim.repeat_times = model->config.batchSize;
+  sim.warmup_times = 0;
+  sim.repeat_times = model->iteration_time;
   printf("begin simulation\n");
   float sim_time1 = sim.simulation_with_network(model, global, CompMode::COMP_MODE_TRAINING, "originalSimulator.log");
   std::cout << "before: " << sim_time1 << std::endl;
@@ -3924,7 +3938,7 @@ void FFIterationConfig::reset() {
 
 // Default Config Parameters
 struct DefaultConfig {
-  const static int epochs = 40;
+  const static int epochs = 1;
   // const static int iterations = 1;
   const static int batchSize = 64;
   const static bool profiling = false;
@@ -4022,6 +4036,10 @@ void FFConfig::parse_args(char **argv, int argc) {
     // }
     if ((!strcmp(argv[i], "--topo-file"))) {
       topo_file = argv[++i];
+      continue;
+    }
+    if ((!strcmp(argv[i], "--iteration"))) {
+      iteration_time = atoi(argv[++i]);
       continue;
     }
     if ((!strcmp(argv[i], "-b")) || (!strcmp(argv[i], "--batch-size"))) {

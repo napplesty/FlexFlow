@@ -87,6 +87,9 @@ void FlexFlow::top_level_task(Task const *task,
   metrics.push_back(METRICS_ACCURACY);
   metrics.push_back(METRICS_SPARSE_CATEGORICAL_CROSSENTROPY);
   ff.compile(optimizer, LOSS_SPARSE_CATEGORICAL_CROSSENTROPY, metrics);
+  for(auto p: ff.parameters) {
+    p->should_add_barrier = true;
+  }
   // Data Loader
   ParallelTensor input_pt, label_pt;
   ff.get_parallel_tensor_from_tensor(input, input_pt);
@@ -105,6 +108,7 @@ void FlexFlow::top_level_task(Task const *task,
     data_loader.reset();
     ff.reset_metrics();
     int iterations = data_loader.num_samples / ffConfig.batchSize;
+    printf("iteration %d\n", iterations);
 
     for (int iter = 0; iter < iterations; iter++) {
       if (std::strlen(alexnetConfig.dataset_path) == 0) {
@@ -135,6 +139,7 @@ void FlexFlow::top_level_task(Task const *task,
   printf("ELAPSED TIME = %.4fs, THROUGHPUT = %.2f samples/s\n",
          run_time,
          data_loader.num_samples * ffConfig.epochs / run_time);
+  printf("iteration times: %.4fms\n", run_time/ff.config.epochs/ 16 * 1000.0f );
 }
 
 size_t get_file_size(std::string const &filename) {

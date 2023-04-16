@@ -1701,8 +1701,10 @@ float LogicalTaskgraphBasedSimulator::simulation_with_network(
 
     for (size_t i = 0; i < cur_task->next_tasks.size(); i++) {
       SimTask *next = cur_task->next_tasks[i];
-      if (end_time > next->ready_time) {
-        next->ready_time = end_time;
+      if(cur_task->type != SimTask::TASK_COMM && cur_task->type != SimTask::TASK_NOMINAL_COMM) { 
+        next->ready_time = std::max(next->ready_time, end_time+std::max(2.5f-cur_task->run_time,0.0f)); // legion调度的问题
+      } else {
+        next->ready_time = std::max(next->ready_time, end_time);
       }
       next->counter--;
       if (next->counter == 0) {
@@ -1850,6 +1852,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
 
   float sim_time = 0.0f;
   float estimated_last_collective_comm_start_time = 0.0f;
+  float estimated_last_collective_comm_end_time = 0.0f;
   ParallelParameter last_update_weight = nullptr;
 
   std::map<Device *, float> device_times;
@@ -1895,6 +1898,7 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
       last_update_task = expand_allreduce_with_optimization(ar_helper, cur_task, last_update_task,
                                                             start_time,
                                                             estimated_last_collective_comm_start_time,
+                                                            estimated_last_collective_comm_end_time,
                                                             devs, device_times, ready_queue, barrier_queue);
       parameter_seq.push_back(cur_task->weight);
       idx++;
@@ -1921,6 +1925,10 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
       device_times[cur_task->device] = end_time;
     }
 
+    if(cur_task->type == SimTask::TASK_UPDATE) {
+      estimated_last_collective_comm_end_time = std::max(estimated_last_collective_comm_end_time, end_time);
+    }
+
     if (end_time > sim_time) {
       sim_time = end_time;
     }
@@ -1943,8 +1951,10 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
 
     for (size_t i = 0; i < cur_task->next_tasks.size(); i++) {
       SimTask *next = cur_task->next_tasks[i];
-      if (end_time > next->ready_time) {
-        next->ready_time = end_time;
+      if(cur_task->type != SimTask::TASK_COMM && cur_task->type != SimTask::TASK_NOMINAL_COMM) { 
+        next->ready_time = std::max(next->ready_time, end_time+std::max(2.5f-cur_task->run_time,0.0f)); // legion调度的问题
+      } else {
+        next->ready_time = std::max(next->ready_time, end_time);
       }
       next->counter--;
       if (next->counter == 0) {
@@ -1960,6 +1970,9 @@ float LogicalTaskgraphBasedSimulator::simulation_with_allreduce_optimize(
 
   printf("original parameter length: %ld, after optimzation: %ld\n",
          parameter_length, parameter_seq.size());
+  for(auto p: parameter_seq) {
+    printf("parameter in op %s: should add barrier: %d\n", p->owner_op->name, p->should_add_barrier);
+  }
   return sim_time;
 }
 
@@ -2457,6 +2470,7 @@ SimTask *LogicalTaskgraphBasedSimulator::expand_allreduce_customize(AllreducePat
   int n_participants = allreduce_task->next_tasks.size();
   SimTask *final_task = new_update_task_unrecorded();
   final_task->weight = allreduce_task->weight;
+  final_task->weight->should_add_barrier = false;
 
   // recall that next_task stores node group in this case
   final_task->device = machine->get_gpu(
@@ -2541,6 +2555,7 @@ SimTask * LogicalTaskgraphBasedSimulator::expand_allreduce_with_optimization(
       SimTask *last_update_task,
       float start_time,
       float &last_collective_comm_task_start_time,
+      float &last_collective_comm_task_end_time,
       std::vector<Device *> &devs,
       std::map<Device *, float> &dev_times,
       std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue,
@@ -2570,7 +2585,8 @@ SimTask * LogicalTaskgraphBasedSimulator::expand_allreduce_with_optimization(
   printf("Debug: allreduce Chosen: %d", allreduce_task->weight->sync_option);
   printf("Debug: allreduce end\n");
   if(last_update_task != nullptr) {
-    last_update_task->weight->should_add_barrier = begin_time > last_collective_comm_task_start_time + last_update_task->run_time * 0.5;
+    last_update_task->weight->should_add_barrier = begin_time > last_collective_comm_task_start_time + last_update_task->run_time * 0.2 && 
+        begin_time < last_collective_comm_task_end_time + last_update_task->run_time * 0.2;
     ret = this->expand_allreduce_customize(ar_pattern, devs, allreduce_task, last_update_task,
                                                   start_time, end_time-begin_time, ready_queue,barrier_queue,
                                                    last_update_task->weight->should_add_barrier);
@@ -2580,7 +2596,8 @@ SimTask * LogicalTaskgraphBasedSimulator::expand_allreduce_with_optimization(
                                                    false);
   }
   ret->run_time = result.second - result.first;
-  last_collective_comm_task_start_time = begin_time;
+  last_collective_comm_task_start_time = std::max(begin_time,last_collective_comm_task_start_time);
+  last_collective_comm_task_end_time = std::max(end_time, last_collective_comm_task_end_time);
   return ret;
 }
 

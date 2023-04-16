@@ -994,6 +994,7 @@ public:
       SimTask *last_update_task,
       float start_time,
       float &last_collective_comm_task_start_time,
+      float &last_collective_comm_task_end_time,
       std::vector<Device *> &devs,
       std::map<Device *, float> &dev_times,
       std::priority_queue<SimTask *, std::vector<SimTask *>, SimTaskCompare> &ready_queue,

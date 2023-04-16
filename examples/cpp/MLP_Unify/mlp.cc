@@ -34,7 +34,7 @@ void FlexFlow::top_level_task(Task const *task,
   FFModel ff(ffConfig);
 
   std::vector<int> hidden_dims = {
-      2024, 2024, 2024, 2024, 2024, 2024, 2024, 1024};
+      4096, 4096, 4096, 4096, 4096, 4096, 4096, 4096};
   Tensor input1, input2;
   {
     int const dims[] = {ffConfig.batchSize, 1024};
@@ -56,6 +56,9 @@ void FlexFlow::top_level_task(Task const *task,
   metrics.push_back(METRICS_ACCURACY);
   metrics.push_back(METRICS_SPARSE_CATEGORICAL_CROSSENTROPY);
   ff.compile(optimizer, LOSS_SPARSE_CATEGORICAL_CROSSENTROPY, metrics);
+  for(auto p: ff.parameters) {
+    p->should_add_barrier = true;
+  }
   for(auto *p: ff.parameters) {
     std::cout << "parameter should be overlap " << p->owner_op->name << ' ' << std::boolalpha << p->should_add_barrier << std::endl;
   }
@@ -93,6 +96,7 @@ void FlexFlow::top_level_task(Task const *task,
          run_time,
          ffConfig.batchSize * 128 * ffConfig.epochs / run_time);
   printf("Epoch time %.4fs\n", run_time/ffConfig.epochs);
+  printf("iteration time %.4fms\n", run_time/ffConfig.epochs/128.0*1000.0);
 }
 
 void FlexFlow::register_custom_tasks() {}

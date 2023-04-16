@@ -159,6 +159,7 @@ public:
   bool perform_memory_search{false};
 
   std::string topo_file;
+  int iteration_time=16;
 };
 
 class FFIterationConfig {
